@@ -4,7 +4,7 @@ pipeline {
     stage('Checkout') {
       steps {
         checkout scm
-        echo '✅ 코드 체크아웃 완료'
+        echo '✅ code checkout complete'
       }
     }
     stage('Trigger Ansible') {
