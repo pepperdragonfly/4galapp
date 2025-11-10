@@ -1,5 +1,7 @@
-FROM openjdk:17-jdk-slim
-WORKDIR /app
-COPY target/*.jar app.jar
+FROM tomcat:9.0-jdk17-temurin
+
+RUN rm -rf /usr/local/tomcat/webapps/ROOT
+COPY ./target/*.war /usr/local/tomcat/webapps/ROOT.war
+
 EXPOSE 8080
-ENTRYPOINT ["java", "-jar", "app.jar"]
+CMD ["catalina.sh", "run"]
