@@ -3,26 +3,21 @@ pipeline {
 
     options {
         timestamps()
-        ansiColor('xterm')
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '20'))
     }
 
     environment {
         REGISTRY_REPO = 'pepperdragonfly/4glapp'
-        ANSDOC_HOST = 'yes25@10.0.2.171'
-        MASTER_HOST = 'yes25@10.0.2.213'
-        NS = 'default'
-        DEPLOY = 'webapp'
+        ANSDOC_HOST   = 'yes25@10.0.2.171'
+        MASTER_HOST   = 'yes25@10.0.2.213'
+        NS            = 'default'
+        DEPLOY        = 'webapp'
 
         GITHUB_SSH_CRED_ID = 'github-ssh'
         ANSDOC_SSH_CRED_ID = 'yes25'
         MASTER_SSH_CRED_ID = 'yes25'
-        DOCKERHUB_PASS_ID = 'dockerhub-pass'
-    }
-
-    tools {
-        git 'git'
+        DOCKERHUB_PASS_ID  = 'dockerhub-pass'
     }
 
     stages {
@@ -30,7 +25,10 @@ pipeline {
             steps {
                 checkout scm
                 script {
-                    env.TAG_SHORT = env.GIT_COMMIT?.take(7) ?: sh(returnStdout: true, script: "git rev-parse --short=7 HEAD").trim()
+                    env.TAG_SHORT = env.GIT_COMMIT?.take(7) ?: sh(
+                        returnStdout: true,
+                        script: "git rev-parse --short=7 HEAD"
+                    ).trim()
                     echo "Commit tag: ${env.TAG_SHORT}"
                 }
             }
