@@ -3,136 +3,105 @@ pipeline {
 
   options {
     timestamps()
-    buildDiscarder(logRotator(numToKeepStr: '20'))   // 최근 빌드 로그만 보관
-    disableConcurrentBuilds()                        // 중복 실행 방지
-  }
-
-  triggers {
-    githubPush()   // GitHub Webhook으로 자동 트리거
+    skipDefaultCheckout()
   }
 
   environment {
-    // --- Git & Docker ---
-    GIT_REPO_SSH   = 'git@github.com:pepperdragonfly/4galapp.git'
-    GIT_BRANCH     = 'master'
-    DOCKER_USER    = 'pepperdragonfly'
-    DOCKER_REPO    = '4glapp'
-    DOCKER_IMAGE   = "${DOCKER_USER}/${DOCKER_REPO}"
-
-    // --- 서버 IP ---
-    ANSDOC_HOST    = '10.0.2.171'
-    MASTERNOD_HOST = '10.0.2.213'
+    REPO_SSH     = 'git@github.com:pepperdragonfly/4galapp.git'
+    DOCKER_IMAGE = 'pepperdragonfly/4glapp'
+    ANSDOC_IP    = '10.0.2.171'  // ansdoc
+    MASTER_IP    = '10.0.2.213'  // masternod
+    DEPLOY       = 'webapp'
+    NAMESPACE    = 'default'
   }
 
   stages {
-
-    /* ========== 1) Checkout ========== */
     stage('Checkout') {
       steps {
-        checkout([
-          $class: 'GitSCM',
-          branches: [[name: "*/${env.GIT_BRANCH}"]],
-          userRemoteConfigs: [[
-            url: env.GIT_REPO_SSH,
-            credentialsId: 'github-ssh'       // GitHub SSH 크리덴셜
-          ]]
+        checkout([$class: 'GitSCM',
+          branches: [[name: '*/master']],
+          userRemoteConfigs: [[url: env.REPO_SSH, credentialsId: 'github-ssh']]
         ])
       }
     }
 
-    /* ========== 2) SSH 연결 스모크 테스트 ========== */
     stage('SSH quick test') {
       steps {
-        sshagent(credentials: ['ansdoc-ssh']) {
-          sh 'ssh -o StrictHostKeyChecking=no yes25@${ANSDOC_HOST} "hostname && whoami"'
+        sshagent (credentials: ['ansdoc-ssh']) {
+          sh 'ssh -o StrictHostKeyChecking=no yes25@${ANSDOC_IP} "hostname && whoami"'
         }
-        sshagent(credentials: ['masternod-ssh']) {
-          sh 'ssh -o StrictHostKeyChecking=no yes25@${MASTERNOD_HOST} "hostname && whoami"'
+        sshagent (credentials: ['masternod-ssh']) {
+          sh 'ssh -o StrictHostKeyChecking=no yes25@${MASTER_IP} "hostname && whoami"'
         }
       }
     }
 
-    /* ========== 3) Build & Push (ansdoc에서 Docker 빌드/푸시) ========== */
     stage('Build & Push on ansdoc') {
       steps {
-        sshagent(credentials: ['ansdoc-ssh']) {
-          withCredentials([usernamePassword(credentialsId: 'dockerhub-cred',
-                                            usernameVariable: 'DH_USER',
-                                            passwordVariable: 'DH_PASS')]) {
-            // 주의: Groovy 인터폴레이션 금지(비번 안전) → ''' 사용
-            sh '''
-              set -e
+        sshagent (credentials: ['ansdoc-ssh']) {
+          withCredentials([usernamePassword(credentialsId: 'dockerhub-cred', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')]) {
+            // 여기서 Groovy 보간 없이 쉘에서만 변수 확장되도록 ''' 사용
+            sh '''#!/usr/bin/env bash
+              set -euo pipefail
 
-              # 태그(커밋 7자리; 없으면 날짜로 대체)
-              if [ -n "$GIT_COMMIT" ]; then
-                TAG_SHORT=$(printf "%s" "$GIT_COMMIT" | cut -c1-7)
-              else
-                TAG_SHORT=$(date +%Y%m%d%H%M)
-              fi
-              IMG="${DOCKER_IMAGE}:${TAG_SHORT}"
+              TAG_SHORT=$(printf %s "$GIT_COMMIT" | cut -c1-7)
+              echo "[build] TAG_SHORT=${TAG_SHORT}"
 
-              # (1) DockerHub 로그인 - 비밀번호는 표준입력으로만 전달 (로그/히스토리 무노출)
-              printf "%s" "$DH_PASS" | ssh -o StrictHostKeyChecking=no yes25@$ANSDOC_HOST \
-                "docker login -u \"$DH_USER\" --password-stdin"
+              # 원격(ansdoc)에서 빌드/푸시 수행 (heredoc으로 안전하게 전달)
+              ssh -o StrictHostKeyChecking=no yes25@${ANSDOC_IP} bash -s <<REMOTE
+set -euo pipefail
 
-              # (2) 원격에서 빌드/푸시
-              ssh -o StrictHostKeyChecking=no yes25@$ANSDOC_HOST bash -lc "
-                set -e
-                mkdir -p ~/app && cd ~/app
+echo "\${DH_PASS}" | docker login -u "\${DH_USER}" --password-stdin
 
-                # 소스 동기화 (최초만 clone, 이후에는 pull)
-                if [ ! -d .git ]; then
-                  git clone --depth=1 https://github.com/pepperdragonfly/4galapp.git .
-                else
-                  git pull --ff-only || true
-                fi
+mkdir -p ~/app && cd ~/app
+if [ ! -d .git ]; then
+  git clone --depth=1 https://github.com/pepperdragonfly/4galapp.git .
+else
+  git pull --ff-only || true
+fi
 
-                # Dockerfile은 리포에 있다고 가정
-                docker build -t $IMG .
-                docker push $IMG
+docker build -t ${DOCKER_IMAGE}:${TAG_SHORT} .
+docker push ${DOCKER_IMAGE}:${TAG_SHORT}
 
-                docker tag  $IMG ${DOCKER_IMAGE}:latest
-                docker push ${DOCKER_IMAGE}:latest
-              "
+docker tag ${DOCKER_IMAGE}:${TAG_SHORT} ${DOCKER_IMAGE}:latest
+docker push ${DOCKER_IMAGE}:latest
 
-              echo "Built & Pushed: $IMG and ${DOCKER_IMAGE}:latest"
+echo "[build] pushed: ${DOCKER_IMAGE}:${TAG_SHORT} and :latest"
+REMOTE
             '''
           }
         }
       }
     }
 
-    /* ========== 4) Deploy (masternod에서 kubectl 롤링 업데이트) ========== */
     stage('Deploy from masternod (kubectl)') {
       steps {
-        sshagent(credentials: ['masternod-ssh']) {
-          // 여기서는 로컬에서 값 확정 후 원격에 적용
-          sh '''
-            set -e
-            DEPLOY="webapp"       # 실제 배포 리소스명에 맞게 수정
-            NS="default"          # 네임스페이스 맞게 수정
-            IMG="${DOCKER_IMAGE}:latest"
+        sshagent (credentials: ['masternod-ssh']) {
+          sh '''#!/usr/bin/env bash
+            set -euo pipefail
+            TAG_SHORT=$(printf %s "$GIT_COMMIT" | cut -c1-7)
+            IMG="${DOCKER_IMAGE}:${TAG_SHORT}"
 
-            ssh -o StrictHostKeyChecking=no yes25@${MASTERNOD_HOST} bash -lc "
-              set -e
-              echo 'Rolling update to '"$IMG"'...'
-              kubectl set image deployment/${DEPLOY} ${DEPLOY}=${IMG} -n ${NS}
-              kubectl rollout status deployment/${DEPLOY} -n ${NS}
-              kubectl get deploy/${DEPLOY} -n ${NS} -o wide
-              kubectl get pods -n ${NS} -o wide
-            "
+            ssh -o StrictHostKeyChecking=no yes25@${MASTER_IP} bash -s <<REMOTE
+set -euo pipefail
+echo "Rolling update to ${IMG} ..."
+kubectl set image deployment/${DEPLOY} ${DEPLOY}=${IMG} -n ${NAMESPACE}
+kubectl rollout status deployment/${DEPLOY} -n ${NAMESPACE} --timeout=180s
+kubectl get deploy/${DEPLOY} -n ${NAMESPACE} -o wide
+kubectl get pods -n ${NAMESPACE} -l app=${DEPLOY} -o wide
+REMOTE
           '''
         }
       }
     }
-  }
+  } // stages
 
   post {
     success {
-      echo "✅ [SUCCESS] ${DOCKER_IMAGE}:latest built & deployed."
+      echo "✅ [SUCCESS] ${env.DOCKER_IMAGE}:${env.GIT_COMMIT.take(7)} built & deployed."
     }
     failure {
-      echo "❌ [FAILURE] Check the console log above."
+      echo '❌ [FAILURE] Pipeline failed. Check console log.'
     }
   }
 }
