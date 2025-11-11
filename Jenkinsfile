@@ -15,9 +15,9 @@ pipeline {
         DEPLOY        = 'webapp'
 
         GITHUB_SSH_CRED_ID = 'github-ssh'
-        ANSDOC_SSH_CRED_ID = 'yes25'
-        MASTER_SSH_CRED_ID = 'yes25'
-        DOCKERHUB_PASS_ID  = 'dockerhub-pass'
+        ANSDOC_SSH_CRED_ID = 'ansdoc-ssh'     // ✔ 네가 준 표
+        MASTER_SSH_CRED_ID = 'masternod-ssh'  // ✔ 네가 준 표
+        DOCKERHUB_PASS_ID  = 'dockerhub-pass' // (변경 없으면 그대로)
     }
 
     stages {
@@ -26,8 +26,7 @@ pipeline {
                 checkout scm
                 script {
                     env.TAG_SHORT = env.GIT_COMMIT?.take(7) ?: sh(
-                        returnStdout: true,
-                        script: "git rev-parse --short=7 HEAD"
+                        returnStdout: true, script: "git rev-parse --short=7 HEAD"
                     ).trim()
                     echo "Commit tag: ${env.TAG_SHORT}"
                 }
