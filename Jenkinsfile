@@ -8,8 +8,8 @@ pipeline {
     }
 
     triggers {
-        githubPush()                 // ✅ GitHub 웹훅
-        // pollSCM('H/2 * * * *')    // ✅ 필요하면 주석 해제해 백업 폴링
+        githubPush()
+        // pollSCM('H/2 * * * *') // ← 필요하면 주석 해제 (웹훅 백업)
     }
 
     environment {
@@ -22,7 +22,9 @@ pipeline {
         GITHUB_SSH_CRED_ID = 'github-ssh'
         ANSDOC_SSH_CRED_ID = 'ansdoc-ssh'
         MASTER_SSH_CRED_ID = 'masternod-ssh'
-        DOCKERHUB_PASS_ID  = 'dockerhub-pass'
+
+        // ★ Docker Hub 자격증명 ID (Username with password 타입)
+        DOCKERHUB_CRED_ID  = 'pepperdragonfly'
     }
 
     stages {
@@ -30,9 +32,7 @@ pipeline {
             steps {
                 checkout scm
                 script {
-                    env.TAG_SHORT = env.GIT_COMMIT?.take(7) ?: sh(
-                        returnStdout: true, script: "git rev-parse --short=7 HEAD"
-                    ).trim()
+                    env.TAG_SHORT = env.GIT_COMMIT?.take(7) ?: sh(returnStdout: true, script: "git rev-parse --short=7 HEAD").trim()
                     echo "Commit tag: ${env.TAG_SHORT}"
                 }
             }
@@ -49,16 +49,34 @@ pipeline {
             }
         }
 
+        stage('Preflight: DockerHub login check (ansdoc)') {
+            steps {
+                sshagent(credentials: [env.ANSDOC_SSH_CRED_ID]) {
+                    withCredentials([usernamePassword(credentialsId: env.DOCKERHUB_CRED_ID, usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')]) {
+                        sh '''
+                            set -euo pipefail
+                            ssh -T -o StrictHostKeyChecking=no ${ANSDOC_HOST} <<'REMOTE'
+                            set -euo pipefail
+                            echo "$DH_PASS" | docker login -u "$DH_USER" --password-stdin 1>/dev/null
+                            docker logout 1>/dev/null || true
+                            echo "[OK] DockerHub login succeeded on ansdoc"
+                            REMOTE
+                        '''
+                    }
+                }
+            }
+        }
+
         stage('Build & Push (ansdoc)') {
             steps {
                 sshagent(credentials: [env.ANSDOC_SSH_CRED_ID]) {
-                    withCredentials([string(credentialsId: env.DOCKERHUB_PASS_ID, variable: 'DH_PASS')]) {
+                    withCredentials([usernamePassword(credentialsId: env.DOCKERHUB_CRED_ID, usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')]) {
                         sh '''
                             set -euo pipefail
                             ssh -T -o StrictHostKeyChecking=no ${ANSDOC_HOST} <<'REMOTE'
                             set -euo pipefail
 
-                            echo "$DH_PASS" | docker login -u pepperdragonfly --password-stdin
+                            echo "$DH_PASS" | docker login -u "$DH_USER" --password-stdin
 
                             mkdir -p ~/app && cd ~/app
                             if [ ! -d .git ]; then
@@ -69,9 +87,9 @@ pipeline {
                             fi
 
                             docker build -t ${REGISTRY_REPO}:${TAG_SHORT} .
-                            docker push ${REGISTRY_REPO}:${TAG_SHORT}
-                            docker tag ${REGISTRY_REPO}:${TAG_SHORT} ${REGISTRY_REPO}:latest
-                            docker push ${REGISTRY_REPO}:latest
+                            docker push  ${REGISTRY_REPO}:${TAG_SHORT}
+                            docker tag   ${REGISTRY_REPO}:${TAG_SHORT} ${REGISTRY_REPO}:latest
+                            docker push  ${REGISTRY_REPO}:latest
                             docker logout || true
                             REMOTE
                         '''
