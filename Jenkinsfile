@@ -42,7 +42,7 @@ pipeline {
           echo "Commit Message: ${env.COMMIT_MSG}"
 
           // [ci skip] 커밋은 전체 스킵
-          if (env.COMMIT_MSG =~ /\[(ci skip|skip ci)\]/i) {
+          if (env.GIT_COMMIT_MESSAGE =~ /(?i)\[(ci skip|skip ci)\]/) {
             echo '[SKIP] Commit message requested to skip CI.'
             env.CI_SKIP_ALL = 'true'
           }
