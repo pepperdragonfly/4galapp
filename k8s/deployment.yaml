@@ -1,25 +1,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: yes25-webapp
-  labels: { app: yes25-webapp }
+  name: webapp
+  namespace: default
 spec:
-  replicas: 2
+  replicas: 1
   selector:
-    matchLabels: { app: yes25-webapp }
+    matchLabels: { app: webapp }
   template:
     metadata:
-      labels: { app: yes25-webapp }
+      labels: { app: webapp }
     spec:
+      # (Docker Hub 비공개면) imagePullSecrets: [{ name: dockerhub-secret }]
       containers:
         - name: webapp
-          image: pepperdragonfly/4glapp:latest
+          image: pepperdragonfly/4glapp:CHANGEME   # Jenkins가 set image로 바꿔줌
+          imagePullPolicy: Always                  # 항상 레지스트리 확인/당김
           ports: [{ containerPort: 8080 }]
-          readinessProbe:
-            httpGet: { path: "/", port: 8080 }
-            initialDelaySeconds: 5
-            periodSeconds: 5
-          livenessProbe:
-            httpGet: { path: "/", port: 8080 }
-            initialDelaySeconds: 15
-            periodSeconds: 10
+
