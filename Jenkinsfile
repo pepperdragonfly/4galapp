@@ -1,46 +1,82 @@
 pipeline {
   agent any
 
+  options {
+    timestamps()
+    ansiColor('xterm')
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+    disableConcurrentBuilds()
+  }
+
+  triggers {
+    githubPush()   // GitHub Webhook
+  }
+
   environment {
-    DOCKER_REPO = "pepperdragonfly/4glapp"
+    // --- 고정 환경 ---
+    GIT_REPO_SSH   = 'git@github.com:pepperdragonfly/4galapp.git'
+    GIT_BRANCH     = 'master'              // 필요시 main으로 변경
+    DOCKER_USER    = 'pepperdragonfly'
+    DOCKER_REPO    = '4glapp'
+    DOCKER_IMAGE   = "${env.DOCKER_USER}/${env.DOCKER_REPO}"
+
+    // --- 서버 IP ---
+    ANSDOC_HOST    = '10.0.2.171'
+    MASTERNOD_HOST = '10.0.2.213'
   }
 
   stages {
 
     stage('Checkout') {
       steps {
-        checkout([$class: 'GitSCM',
-          branches: [[name: '*/main']],
+        // GitHub SSH 키: github-ssh (없으면 UI에서 생성)
+        checkout([
+          $class: 'GitSCM',
+          branches: [[name: "*/${env.GIT_BRANCH}"]],
           userRemoteConfigs: [[
-            url: 'git@github.com:pepperdragonfly/4galapp.git',
+            url: env.GIT_REPO_SSH,
             credentialsId: 'github-ssh'
           ]]
         ])
       }
     }
 
+    stage('SSH quick test') {
+      steps {
+        sshagent(credentials: ['ansdoc-ssh']) {
+          sh 'ssh -o StrictHostKeyChecking=no yes25@${ANSDOC_HOST} "hostname && whoami"'
+        }
+        sshagent(credentials: ['masternod-ssh']) {
+          sh 'ssh -o StrictHostKeyChecking=no yes25@${MASTERNOD_HOST} "hostname && whoami"'
+        }
+      }
+    }
+
     stage('Build & Push on ansdoc') {
       steps {
-        withCredentials([usernamePassword(credentialsId: 'dockerhub-cred',
-                                          usernameVariable: 'DH_USER',
-                                          passwordVariable: 'DH_PASS')]) {
-          sshagent(credentials: ['ansdoc-ssh']) {
+        sshagent(credentials: ['ansdoc-ssh']) {
+          withCredentials([usernamePassword(credentialsId: 'dockerhub-cred', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')]) {
             sh '''
-              set -e
+              ssh -o StrictHostKeyChecking=no yes25@${ANSDOC_HOST} bash -lc '
+                set -e
+                echo "$DH_PASS" | docker login -u "$DH_USER" --password-stdin
 
-              # 1) 태그 계산(로컬에서 계산해 원격에 넘김)
-              TAG=$(git rev-parse --short HEAD 2>/dev/null || date +%s)
-              echo "TAG=$TAG"
+                # 작업 디렉토리 준비
+                mkdir -p ~/app && cd ~/app
 
-              # 2) 코드 동기화
-              rsync -az --delete ./ yes25@yes25ansdoc:~/webapp/
+                # 소스 동기화 (리포를 직접 클론하고 싶으면 주석 해제)
+                # test -d .git || git clone --depth=1 https://github.com/pepperdragonfly/4galapp.git .
+                # git pull --ff-only || true
 
-              # 3) 원격(ansdoc)에서 빌드
-              ssh -o StrictHostKeyChecking=no yes25@yes25ansdoc "bash -lc 'set -e; cd ~/webapp; docker build -t ${DOCKER_REPO}:$TAG -t ${DOCKER_REPO}:latest .'"
+                # Dockerfile은 리포에 있다고 가정 (필요하면 경로 수정)
+                TAG_SHORT=$(echo ${GIT_COMMIT} | cut -c1-7)
 
-              # 4) 원격(ansdoc)에서 로그인 & 푸시
-              printf "%s" "$DH_PASS" | ssh -o StrictHostKeyChecking=no yes25@yes25ansdoc "docker login -u \"$DH_USER\" --password-stdin"
-              ssh -o StrictHostKeyChecking=no yes25@yes25ansdoc "docker push ${DOCKER_REPO}:$TAG && docker push ${DOCKER_REPO}:latest"
+                docker build -t ${DOCKER_IMAGE}:${TAG_SHORT} .
+                docker push ${DOCKER_IMAGE}:${TAG_SHORT}
+
+                docker tag  ${DOCKER_IMAGE}:${TAG_SHORT} ${DOCKER_IMAGE}:latest
+                docker push ${DOCKER_IMAGE}:latest
+              '
             '''
           }
         }
@@ -51,17 +87,17 @@ pipeline {
       steps {
         sshagent(credentials: ['masternod-ssh']) {
           sh '''
-            set -e
-            # 1) 매니페스트 동기화
-            rsync -az --delete ./k8s/ yes25@yes25masternod:~/deploy/k8s/
-
-            # 2) 적용 및 롤링 상태 확인
-            ssh -o StrictHostKeyChecking=no yes25@yes25masternod "
+            ssh -o StrictHostKeyChecking=no yes25@${MASTERNOD_HOST} bash -lc '
               set -e
-              kubectl apply -f ~/deploy/k8s/service.yaml
-              kubectl apply -f ~/deploy/k8s/deployment.yaml
-              kubectl rollout status deployment/yes25-webapp --timeout=180s
-            "
+              # 배포 리소스 이름/네임스페이스 맞게 수정
+              NS=default
+              DEPLOY=webapp
+
+              # 최신 이미지로 롤링 업데이트
+              kubectl set image deploy/${DEPLOY} ${DEPLOY}=${DOCKER_IMAGE}:latest -n ${NS}
+              kubectl rollout status deploy/${DEPLOY} -n ${NS}
+              kubectl get deploy/${DEPLOY} -n ${NS} -o wide
+            '
           '''
         }
       }
@@ -70,15 +106,12 @@ pipeline {
 
   post {
     success {
-      echo "✅ Deployed: ${env.DOCKER_REPO}:latest"
+      echo "✅ Deploy OK: ${env.DOCKER_IMAGE}:latest"
     }
     failure {
-      sshagent(credentials: ['masternod-ssh']) {
-        sh '''
-          ssh -o StrictHostKeyChecking=no yes25@yes25masternod "kubectl rollout undo deployment/yes25-webapp || true"
-        '''
-      }
-      echo "❌ Failed — rollback attempted"
+      echo "❌ Pipeline failed"
+      // 필요하면 여기서 알림(Webhook/Slack 등) 추가
     }
   }
 }
+
