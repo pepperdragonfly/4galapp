@@ -22,7 +22,6 @@ pipeline {
         ANSDOC_SSH_CRED_ID = 'ansdoc-ssh'
         MASTER_SSH_CRED_ID = 'masternod-ssh'
 
-        // Docker Hub credential ID (username/password)
         DOCKERHUB_CRED_ID  = 'dockerhub-cred'
     }
 
@@ -54,7 +53,6 @@ pipeline {
                     withCredentials([usernamePassword(credentialsId: env.DOCKERHUB_CRED_ID, usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')]) {
                         sh '''
                             set -euo pipefail
-                            # 로컬에서 변수 확장 → 원격에 전달
                             ssh -o StrictHostKeyChecking=no ${ANSDOC_HOST} "printf '%s' \"$DH_PASS\" | docker login -u \"$DH_USER\" --password-stdin 1>/dev/null && docker logout 1>/dev/null || true"
                             echo "[OK] DockerHub login succeeded on ansdoc"
                         '''
@@ -70,13 +68,11 @@ pipeline {
                         sh '''
                             set -euo pipefail
 
-                            # 로그인
                             ssh -o StrictHostKeyChecking=no ${ANSDOC_HOST} "printf '%s' \"$DH_PASS\" | docker login -u \"$DH_USER\" --password-stdin"
 
-                            # 소스 동기화 + 빌드/푸시
                             ssh -o StrictHostKeyChecking=no ${ANSDOC_HOST} "mkdir -p ~/app && cd ~/app && \
                               ( [ ! -d .git ] && git clone --depth=1 https://github.com/pepperdragonfly/4galapp.git . || (git fetch --all --prune && git reset --hard origin/master) ) && \
-                              docker build -t ${REGISTRY_REPO}:${TAG_SHORT} . && \
+                              docker build --build-arg BUILD_TS=${TAG_SHORT} -t ${REGISTRY_REPO}:${TAG_SHORT} . && \
                               docker push  ${REGISTRY_REPO}:${TAG_SHORT} && \
                               docker tag   ${REGISTRY_REPO}:${TAG_SHORT} ${REGISTRY_REPO}:latest && \
                               docker push  ${REGISTRY_REPO}:latest && \
