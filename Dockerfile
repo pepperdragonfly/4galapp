@@ -1,7 +1,5 @@
-FROM tomcat:9.0-jdk17-temurin
-
+FROM tomcat:9.0-jdk17
 RUN rm -rf /usr/local/tomcat/webapps/ROOT
-COPY ./target/*.war /usr/local/tomcat/webapps/ROOT.war
-
+COPY ./src/main/webapp /usr/local/tomcat/webapps/ROOT
 EXPOSE 8080
 CMD ["catalina.sh", "run"]
