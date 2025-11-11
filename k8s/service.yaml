@@ -1,13 +1,14 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: yes25-webapp-svc
-  labels: { app: yes25-webapp }
+  name: webapp
+  namespace: default
+  labels:
+    app: webapp
 spec:
-  type: NodePort
-  selector: { app: yes25-webapp }
+  selector:
+    app: webapp   # Deployment의 app: webapp 과 반드시 일치해야 함
+  type: LoadBalancer  # 퍼블릭으로 열림 (AWS/NCP/GCP 등)
   ports:
-    - name: http
-      port: 80
-      targetPort: 8080
-      nodePort: 30081
+    - port: 80          # 외부 접근 포트 (HTTP 기본)
+      targetPort: 8080  # Pod 내부 컨테이너 포트 (Tomcat)
