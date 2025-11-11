@@ -1,138 +1,91 @@
 pipeline {
-  agent any
+sshagent(credentials: [env.MASTER_SSH_CRED_ID]) {
+sh '''
+ssh -o StrictHostKeyChecking=no ${MASTER_HOST} 'hostname && whoami'
+'''
+}
+}
+}
 
-  options {
-    timestamps()
-    buildDiscarder(logRotator(numToKeepStr: '20'))   // 최근 빌드 로그만 보관
-    disableConcurrentBuilds()                        // 중복 실행 방지
-  }
 
-  triggers {
-    githubPush()   // GitHub Webhook으로 자동 트리거
-  }
+stage('Build & Push (ansdoc)') {
+steps {
+sshagent(credentials: [env.ANSDOC_SSH_CRED_ID]) {
+withCredentials([string(credentialsId: env.DOCKERHUB_PASS_ID, variable: 'DH_PASS')]) {
+sh '''
+set -euo pipefail
+ssh -T -o StrictHostKeyChecking=no ${ANSDOC_HOST} <<'REMOTE'
+set -euo pipefail
 
-  environment {
-    // --- Git & Docker ---
-    GIT_REPO_SSH   = 'git@github.com:pepperdragonfly/4galapp.git'
-    GIT_BRANCH     = 'master'
-    DOCKER_USER    = 'pepperdragonfly'
-    DOCKER_REPO    = '4glapp'
-    DOCKER_IMAGE   = "${DOCKER_USER}/${DOCKER_REPO}"
 
-    // --- 서버 IP ---
-    ANSDOC_HOST    = '10.0.2.171'
-    MASTERNOD_HOST = '10.0.2.213'
-  }
+# Docker 로그인 (세션 범위)
+echo "$DH_PASS" | docker login -u pepperdragonfly --password-stdin
 
-  stages {
 
-    /* ========== 1) Checkout ========== */
-    stage('Checkout') {
-      steps {
-        checkout([
-          $class: 'GitSCM',
-          branches: [[name: "*/${env.GIT_BRANCH}"]],
-          userRemoteConfigs: [[
-            url: env.GIT_REPO_SSH,
-            credentialsId: 'github-ssh'       // GitHub SSH 크리덴셜
-          ]]
-        ])
-      }
-    }
+# 소스 최신화: 항상 원격 HEAD 기준
+mkdir -p ~/app && cd ~/app
+if [ ! -d .git ]; then
+git clone --depth=1 https://github.com/pepperdragonfly/4galapp.git .
+else
+git fetch --all --prune
+git reset --hard origin/master
+fi
 
-    /* ========== 2) SSH 연결 스모크 테스트 ========== */
-    stage('SSH quick test') {
-      steps {
-        sshagent(credentials: ['ansdoc-ssh']) {
-          sh 'ssh -o StrictHostKeyChecking=no yes25@${ANSDOC_HOST} "hostname && whoami"'
-        }
-        sshagent(credentials: ['masternod-ssh']) {
-          sh 'ssh -o StrictHostKeyChecking=no yes25@${MASTERNOD_HOST} "hostname && whoami"'
-        }
-      }
-    }
 
-    /* ========== 3) Build & Push (ansdoc에서 Docker 빌드/푸시) ========== */
-    stage('Build & Push on ansdoc') {
-      steps {
-        sshagent(credentials: ['ansdoc-ssh']) {
-          withCredentials([usernamePassword(credentialsId: 'dockerhub-cred',
-                                            usernameVariable: 'DH_USER',
-                                            passwordVariable: 'DH_PASS')]) {
-            // 주의: Groovy 인터폴레이션 금지(비번 안전) → ''' 사용
-            sh '''
-              set -e
+# 캐시가 필요 없으면 --no-cache 옵션 잠깐 사용 가능
+docker build -t ${REGISTRY_REPO}:${TAG_SHORT} .
+docker push ${REGISTRY_REPO}:${TAG_SHORT}
 
-              # 태그(커밋 7자리; 없으면 날짜로 대체)
-              if [ -n "$GIT_COMMIT" ]; then
-                TAG_SHORT=$(printf "%s" "$GIT_COMMIT" | cut -c1-7)
-              else
-                TAG_SHORT=$(date +%Y%m%d%H%M)
-              fi
-              IMG="${DOCKER_IMAGE}:${TAG_SHORT}"
 
-              # (1) DockerHub 로그인 - 비밀번호는 표준입력으로만 전달 (로그/히스토리 무노출)
-              printf "%s" "$DH_PASS" | ssh -o StrictHostKeyChecking=no yes25@$ANSDOC_HOST \
-                "docker login -u \"$DH_USER\" --password-stdin"
+# (선택) latest도 유지하고 싶으면 추가 푸시
+docker tag ${REGISTRY_REPO}:${TAG_SHORT} ${REGISTRY_REPO}:latest
+docker push ${REGISTRY_REPO}:latest
 
-              # (2) 원격에서 빌드/푸시
-              ssh -o StrictHostKeyChecking=no yes25@$ANSDOC_HOST bash -lc "
-                set -e
-                mkdir -p ~/app && cd ~/app
 
-                # 소스 동기화 (최초만 clone, 이후에는 pull)
-                if [ ! -d .git ]; then
-                  git clone --depth=1 https://github.com/pepperdragonfly/4galapp.git .
-                else
-                  git pull --ff-only || true
-                fi
+docker logout || true
+REMOTE
+'''
+}
+}
+}
+}
 
-                # Dockerfile은 리포에 있다고 가정
-                docker build -t $IMG .
-                docker push $IMG
 
-                docker tag  $IMG ${DOCKER_IMAGE}:latest
-                docker push ${DOCKER_IMAGE}:latest
-              "
+stage('Deploy (kubectl on master)') {
+steps {
+sshagent(credentials: [env.MASTER_SSH_CRED_ID]) {
+sh '''
+set -euo pipefail
+ssh -T -o StrictHostKeyChecking=no ${MASTER_HOST} <<REMOTE
+set -euo pipefail
+echo "Rolling update to ${REGISTRY_REPO}:${TAG_SHORT} ..."
+kubectl set image deployment/${DEPLOY} ${DEPLOY}=${REGISTRY_REPO}:${TAG_SHORT} -n ${NS}
+kubectl rollout status deployment/${DEPLOY} -n ${NS} --timeout=180s
+kubectl annotate deployment/${DEPLOY} -n ${NS} kubernetes.io/change-cause="Set ${DEPLOY} image to ${REGISTRY_REPO}:${TAG_SHORT}" --overwrite
 
-              echo "Built & Pushed: $IMG and ${DOCKER_IMAGE}:latest"
-            '''
-          }
-        }
-      }
-    }
 
-    /* ========== 4) Deploy (masternod에서 kubectl 롤링 업데이트) ========== */
-    stage('Deploy from masternod (kubectl)') {
-      steps {
-        sshagent(credentials: ['masternod-ssh']) {
-          // 여기서는 로컬에서 값 확정 후 원격에 적용
-          sh '''
-            set -e
-            DEPLOY="webapp"       # 실제 배포 리소스명에 맞게 수정
-            NS="default"          # 네임스페이스 맞게 수정
-            IMG="${DOCKER_IMAGE}:latest"
+echo "\n[VERIFY] Deploy & Pods"
+kubectl get deploy/${DEPLOY} -n ${NS} -o wide
+kubectl get pods -n ${NS} -l app=${DEPLOY} -o wide
 
-            ssh -o StrictHostKeyChecking=no yes25@${MASTERNOD_HOST} bash -lc "
-              set -e
-              echo 'Rolling update to '"$IMG"'...'
-              kubectl set image deployment/${DEPLOY} ${DEPLOY}=${IMG} -n ${NS}
-              kubectl rollout status deployment/${DEPLOY} -n ${NS}
-              kubectl get deploy/${DEPLOY} -n ${NS} -o wide
-              kubectl get pods -n ${NS} -o wide
-            "
-          '''
-        }
-      }
-    }
-  }
 
-  post {
-    success {
-      echo "✅ [SUCCESS] ${DOCKER_IMAGE}:latest built & deployed."
-    }
-    failure {
-      echo "❌ [FAILURE] Check the console log above."
-    }
-  }
+echo "\n[VERIFY] Running image digest (per pod)"
+kubectl get pods -n ${NS} -l app=${DEPLOY} -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[0].imageID}{"\n"}{end}'
+echo
+REMOTE
+'''
+}
+}
+}
+}
+
+
+post {
+success {
+echo "✅ SUCCESS: ${REGISTRY_REPO}:${TAG_SHORT} built & deployed to ${DEPLOY}"
+}
+failure {
+echo "❌ FAILED: Check logs above."
+}
+}
 }
