@@ -2,169 +2,137 @@ pipeline {
   agent any
 
   options {
-    timeout(time: 30, unit: 'MINUTES')
-    disableConcurrentBuilds()                       // 동시에 여러 빌드 금지
-    quietPeriod(15)                                 // 15초 내 중복 웹훅은 묶어서 처리
-    rateLimitBuilds(throttle: [count: 1, durationName: 'minute']) // 분당 1회 제한
-    buildDiscarder(logRotator(numToKeepStr: '20'))  // 오래된 빌드 자동 삭제
     timestamps()
+    buildDiscarder(logRotator(numToKeepStr: '20'))   // 최근 빌드 로그만 보관
+    disableConcurrentBuilds()                        // 중복 실행 방지
   }
 
   triggers {
-    githubPush()  // GitHub webhook 자동 트리거
+    githubPush()   // GitHub Webhook으로 자동 트리거
   }
 
   environment {
-    ANSDOC     = '10.0.2.171'
-    MASTERNOD  = '10.0.2.213'
-    NAMESPACE  = 'default'
-    DEPLOYMENT = 'webapp'
-    DOCKER_IMAGE = 'pepperdragonfly/4glapp'
+    // --- Git & Docker ---
+    GIT_REPO_SSH   = 'git@github.com:pepperdragonfly/4galapp.git'
+    GIT_BRANCH     = 'master'
+    DOCKER_USER    = 'pepperdragonfly'
+    DOCKER_REPO    = '4glapp'
+    DOCKER_IMAGE   = "${DOCKER_USER}/${DOCKER_REPO}"
 
-    // 변경 감지 기준: 이 경로 이외엔 스킵
-    CHANGE_GLOBS = "Dockerfile\nsrc/**\nk8s/**\nJenkinsfile"
+    // --- 서버 IP ---
+    ANSDOC_HOST    = '10.0.2.171'
+    MASTERNOD_HOST = '10.0.2.213'
   }
 
   stages {
 
+    /* ========== 1) Checkout ========== */
     stage('Checkout') {
       steps {
-        checkout scm
+        checkout([
+          $class: 'GitSCM',
+          branches: [[name: "*/${env.GIT_BRANCH}"]],
+          userRemoteConfigs: [[
+            url: env.GIT_REPO_SSH,
+            credentialsId: 'github-ssh'       // GitHub SSH 크리덴셜
+          ]]
+        ])
       }
     }
 
-    stage('Compute META & Change Detection') {
-      steps {
-        script {
-          env.TAG_SHORT  = sh(returnStdout: true, script: 'git rev-parse --short=7 HEAD').trim()
-          env.COMMIT_MSG = sh(returnStdout: true, script: 'git log -1 --pretty=%B').trim()
-          echo "TAG_SHORT=${env.TAG_SHORT}"
-          echo "Commit Message: ${env.COMMIT_MSG}"
-
-          // [ci skip] 커밋은 전체 스킵
-          if (env.GIT_COMMIT_MESSAGE =~ /(?i)\[(ci skip|skip ci)\]/) {
-            echo '[SKIP] Commit message requested to skip CI.'
-            env.CI_SKIP_ALL = 'true'
-          }
-
-          // 중요 파일 변경 여부 확인
-          writeFile file: 'ci_globs.txt', text: env.CHANGE_GLOBS + "\n"
-          def changed = sh(returnStatus: true, script: '''
-            set -e
-            git diff-tree --no-commit-id --name-only -r HEAD > .changed_files
-            REGEX=$(sed -E "s/[.]/\\\\./g; s/\\*/.*/g" ci_globs.txt | paste -sd'|' -)
-            if [ -s .changed_files ]; then
-              if grep -E "$REGEX" .changed_files >/dev/null; then
-                exit 0
-              else
-                exit 3
-              fi
-            fi
-          ''')
-          if (changed == 3) {
-            echo '[SKIP] No relevant file changes detected.'
-            env.CI_SKIP_BUILD = 'true'
-          }
-        }
-      }
-    }
-
-    stage('SSH Quick Test') {
-      when { expression { env.CI_SKIP_ALL != 'true' } }
+    /* ========== 2) SSH 연결 스모크 테스트 ========== */
+    stage('SSH quick test') {
       steps {
         sshagent(credentials: ['ansdoc-ssh']) {
-          sh "ssh -o StrictHostKeyChecking=no yes25@${env.ANSDOC} 'hostname && whoami'"
+          sh 'ssh -o StrictHostKeyChecking=no yes25@${ANSDOC_HOST} "hostname && whoami"'
         }
         sshagent(credentials: ['masternod-ssh']) {
-          sh "ssh -o StrictHostKeyChecking=no yes25@${env.MASTERNOD} 'hostname && whoami'"
+          sh 'ssh -o StrictHostKeyChecking=no yes25@${MASTERNOD_HOST} "hostname && whoami"'
         }
       }
     }
 
+    /* ========== 3) Build & Push (ansdoc에서 Docker 빌드/푸시) ========== */
     stage('Build & Push on ansdoc') {
-      when {
-        allOf {
-          expression { env.CI_SKIP_ALL != 'true' }
-          expression { env.CI_SKIP_BUILD != 'true' }
-        }
-      }
       steps {
         sshagent(credentials: ['ansdoc-ssh']) {
-          withCredentials([usernamePassword(credentialsId: 'dockerhub', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')]) {
-            sh """
+          withCredentials([usernamePassword(credentialsId: 'dockerhub-cred',
+                                            usernameVariable: 'DH_USER',
+                                            passwordVariable: 'DH_PASS')]) {
+            // 주의: Groovy 인터폴레이션 금지(비번 안전) → ''' 사용
+            sh '''
               set -e
-              printf '%s' "\$DH_PASS" | ssh -o StrictHostKeyChecking=no yes25@${env.ANSDOC} 'docker login -u "\$DH_USER" --password-stdin'
-              ssh -o StrictHostKeyChecking=no yes25@${env.ANSDOC} 'bash -s' <<'EOS'
-              set -e
-              mkdir -p ~/app && cd ~/app
-              if [ ! -d .git ]; then
-                git clone --depth=1 https://github.com/pepperdragonfly/4galapp.git .
+
+              # 태그(커밋 7자리; 없으면 날짜로 대체)
+              if [ -n "$GIT_COMMIT" ]; then
+                TAG_SHORT=$(printf "%s" "$GIT_COMMIT" | cut -c1-7)
               else
-                git pull --ff-only || true
+                TAG_SHORT=$(date +%Y%m%d%H%M)
               fi
+              IMG="${DOCKER_IMAGE}:${TAG_SHORT}"
 
-              docker build -t ${env.DOCKER_IMAGE}:${env.TAG_SHORT} .
-              docker push ${env.DOCKER_IMAGE}:${env.TAG_SHORT}
+              # (1) DockerHub 로그인 - 비밀번호는 표준입력으로만 전달 (로그/히스토리 무노출)
+              printf "%s" "$DH_PASS" | ssh -o StrictHostKeyChecking=no yes25@$ANSDOC_HOST \
+                "docker login -u \"$DH_USER\" --password-stdin"
 
-              docker tag ${env.DOCKER_IMAGE}:${env.TAG_SHORT} ${env.DOCKER_IMAGE}:latest
-              docker push ${env.DOCKER_IMAGE}:latest
-EOS
-            """
-            echo "✅ Built & pushed: ${env.DOCKER_IMAGE}:${env.TAG_SHORT} (+latest)"
+              # (2) 원격에서 빌드/푸시
+              ssh -o StrictHostKeyChecking=no yes25@$ANSDOC_HOST bash -lc "
+                set -e
+                mkdir -p ~/app && cd ~/app
+
+                # 소스 동기화 (최초만 clone, 이후에는 pull)
+                if [ ! -d .git ]; then
+                  git clone --depth=1 https://github.com/pepperdragonfly/4galapp.git .
+                else
+                  git pull --ff-only || true
+                fi
+
+                # Dockerfile은 리포에 있다고 가정
+                docker build -t $IMG .
+                docker push $IMG
+
+                docker tag  $IMG ${DOCKER_IMAGE}:latest
+                docker push ${DOCKER_IMAGE}:latest
+              "
+
+              echo "Built & Pushed: $IMG and ${DOCKER_IMAGE}:latest"
+            '''
           }
         }
       }
     }
 
+    /* ========== 4) Deploy (masternod에서 kubectl 롤링 업데이트) ========== */
     stage('Deploy from masternod (kubectl)') {
-      when {
-        allOf {
-          expression { env.CI_SKIP_ALL != 'true' }
-          expression { env.CI_SKIP_BUILD != 'true' }
-        }
-      }
       steps {
         sshagent(credentials: ['masternod-ssh']) {
-          sh """
+          // 여기서는 로컬에서 값 확정 후 원격에 적용
+          sh '''
             set -e
-            ssh -o StrictHostKeyChecking=no yes25@${env.MASTERNOD} 'bash -lc "
-              set -e
-              echo Rolling update to ${env.DOCKER_IMAGE}:${env.TAG_SHORT}...
-              kubectl set image deployment/${env.DEPLOYMENT} ${env.DEPLOYMENT}=${env.DOCKER_IMAGE}:${env.TAG_SHORT} -n ${env.NAMESPACE}
-              kubectl rollout status deployment/${env.DEPLOYMENT} -n ${env.NAMESPACE}
-              kubectl get deploy/${env.DEPLOYMENT} -n ${env.NAMESPACE} -o wide
-              kubectl get pods -l app=${env.DEPLOYMENT} -n ${env.NAMESPACE} -o wide
-            "'
-          """
-        }
-      }
-    }
+            DEPLOY="webapp"       # 실제 배포 리소스명에 맞게 수정
+            NS="default"          # 네임스페이스 맞게 수정
+            IMG="${DOCKER_IMAGE}:latest"
 
-    stage('Smoke Check (optional)') {
-      when {
-        allOf {
-          expression { env.CI_SKIP_ALL != 'true' }
-          expression { env.CI_SKIP_BUILD != 'true' }
+            ssh -o StrictHostKeyChecking=no yes25@${MASTERNOD_HOST} bash -lc "
+              set -e
+              echo 'Rolling update to '"$IMG"'...'
+              kubectl set image deployment/${DEPLOY} ${DEPLOY}=${IMG} -n ${NS}
+              kubectl rollout status deployment/${DEPLOY} -n ${NS}
+              kubectl get deploy/${DEPLOY} -n ${NS} -o wide
+              kubectl get pods -n ${NS} -o wide
+            "
+          '''
         }
-      }
-      steps {
-        echo 'ℹ️  Optionally: curl or ALB endpoint health-check could be run here.'
       }
     }
   }
 
   post {
     success {
-      echo "✅ [SUCCESS] ${env.DOCKER_IMAGE}:${env.TAG_SHORT} built & deployed."
-    }
-    aborted {
-      echo "🟨 [ABORTED] Build aborted."
+      echo "✅ [SUCCESS] ${DOCKER_IMAGE}:latest built & deployed."
     }
     failure {
-      echo "❌ [FAILURE] Pipeline failed. Check console log."
-    }
-    always {
-      echo "Build meta => TAG_SHORT=${env.TAG_SHORT ?: 'n/a'} / SKIP_ALL=${env.CI_SKIP_ALL ?: 'false'} / SKIP_BUILD=${env.CI_SKIP_BUILD ?: 'false'}"
+      echo "❌ [FAILURE] Check the console log above."
     }
   }
 }
