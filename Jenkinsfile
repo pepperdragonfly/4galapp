@@ -7,6 +7,11 @@ pipeline {
         buildDiscarder(logRotator(numToKeepStr: '20'))
     }
 
+    triggers {
+        githubPush()                 // ✅ GitHub 웹훅
+        // pollSCM('H/2 * * * *')    // ✅ 필요하면 주석 해제해 백업 폴링
+    }
+
     environment {
         REGISTRY_REPO = 'pepperdragonfly/4glapp'
         ANSDOC_HOST   = 'yes25@10.0.2.171'
@@ -15,9 +20,9 @@ pipeline {
         DEPLOY        = 'webapp'
 
         GITHUB_SSH_CRED_ID = 'github-ssh'
-        ANSDOC_SSH_CRED_ID = 'ansdoc-ssh'     // ✔ 네가 준 표
-        MASTER_SSH_CRED_ID = 'masternod-ssh'  // ✔ 네가 준 표
-        DOCKERHUB_PASS_ID  = 'dockerhub-pass' // (변경 없으면 그대로)
+        ANSDOC_SSH_CRED_ID = 'ansdoc-ssh'
+        MASTER_SSH_CRED_ID = 'masternod-ssh'
+        DOCKERHUB_PASS_ID  = 'dockerhub-pass'
     }
 
     stages {
