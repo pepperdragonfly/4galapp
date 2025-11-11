@@ -1,0 +1,8 @@
+- name: Base packages
+  hosts: ansdoc
+  become: yes
+  tasks:
+    - name: Ensure rsync and git are present
+      package:
+        name: [rsync, git]
+        state: present
