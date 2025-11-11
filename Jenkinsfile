@@ -9,7 +9,6 @@ pipeline {
 
     triggers {
         githubPush()
-        // pollSCM('H/2 * * * *') // ← 필요하면 주석 해제 (웹훅 백업)
     }
 
     environment {
@@ -23,8 +22,8 @@ pipeline {
         ANSDOC_SSH_CRED_ID = 'ansdoc-ssh'
         MASTER_SSH_CRED_ID = 'masternod-ssh'
 
-        // ★ Docker Hub 자격증명 ID (Username with password 타입)
-        DOCKERHUB_CRED_ID  = 'pepperdragonfly'
+        // ✅ 실제 DockerHub Credential ID
+        DOCKERHUB_CRED_ID  = 'dockerhub-cred'
     }
 
     stages {
