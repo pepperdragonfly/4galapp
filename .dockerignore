@@ -1,7 +1,9 @@
+# 꼭 필요한 것만 제외하고, src/는 절대 제외하지 마!
 .git
 .gitignore
 README.md
-ansible/
-k8s/
-**/*.md
+*.md
+target/
+node_modules/
+*.log
 **/.DS_Store
